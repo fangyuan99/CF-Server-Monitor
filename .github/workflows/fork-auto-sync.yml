@@ -1,0 +1,66 @@
+# Fork-only workflow. Unique filename so `git merge` from upstream will not
+# overwrite it (upstream has no file with this name).
+# Do not use hard-reset / ff-only sync: that would drop this file.
+name: Fork Auto Sync
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: fork-auto-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream and deploy
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream/main
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/huilang-me/CF-Server-Monitor.git"
+          git fetch upstream main
+
+          before="$(git rev-parse HEAD)"
+          if ! git merge --no-edit upstream/main; then
+            echo "::error::Merge conflict with upstream. Resolve locally, then re-run."
+            git merge --abort || true
+            exit 1
+          fi
+          after="$(git rev-parse HEAD)"
+
+          if [ "$before" = "$after" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Already up to date with upstream/main."
+            exit 0
+          fi
+
+          git push origin HEAD:"${GITHUB_REF_NAME}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "Merged upstream/main: $before -> $after"
+
+      - name: Trigger Cloudflare deploy
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GITHUB_TOKEN pushes do not fire `on: push` workflows.
+          # workflow_dispatch is allowed and will run deploy.yml.
+          gh workflow run "Deploy to Cloudflare Workers" --ref "${GITHUB_REF_NAME}"
+          echo "Dispatched Deploy to Cloudflare Workers."
